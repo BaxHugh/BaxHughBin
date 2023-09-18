@@ -1,0 +1,98 @@
+#!/bin/bash
+
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+RUN_MANUAL=0
+
+while getopts "hm" arg; do
+	case $arg in
+		h) # display Help
+        	echo Help Needs Implementing
+			echo "-m	Backup locations marked with manual."
+        	exit;;
+	  	m) # run manual
+			RUN_MANUAL=1
+			;;
+     	\j?) # Invalid arg
+        	echo "Error: Invalid arg"
+        	exit;;
+	esac
+done
+
+
+BACKUP_CONF="$HOME/.backup.conf"
+
+function local_diff_dirs_names_only() {
+	# Don't override existing tmp file so can be used in parallel
+	TMP_FILE0=/tmp/.diff-dirs
+	TMP_FILE=$TMP_FILE0
+	cnt=0
+	while [ -f $TMP_FILE ]; do
+		cnt=$(($cnt + 1))
+		TMP_FILE=$TMP_FILE0$cnt
+	done
+	# Could use -type d for dirs only, -type f for normal files only
+	find $2 -printf "%P\n" | sort > $TMP_FILE
+	find $1 -printf "%P\n" | sort | diff --color - $TMP_FILE
+}
+
+function lower () {
+	echo $(echo $1 | tr '[:upper:]' '[:lower:]')
+}
+
+function invalid_so_exit () {
+	echo -e "${RED}Invalid config file at $BACKUP_CONF${NC}"
+	exit 1
+}
+
+function no_config_so_exit () {
+	echo -e "${RED}No backup config file found at $BACKUP_CONF${NC}"
+	exit 1
+}
+
+if [ ! -f $BACKUP_CONF ]; then
+	no_config_so_exit
+fi
+
+BACKUP_TARGET_DRIVE=$(dasel -f $BACKUP_CONF -p toml -m "backup.target_drive") || invalid_so_exit
+BACKUP_TARGET_LOCATION=$(dasel -f $BACKUP_CONF -p toml -m "backup.target_location") || invalid_so_exit
+BACKUP_TARGET=$BACKUP_TARGET_DRIVE/$BACKUP_TARGET_LOCATION
+
+BACKED_UP=()
+
+INDS=$(dasel -f $BACKUP_CONF -p toml -m "machine.locations.-") || invalid_so_exit
+for i in $INDS ; do
+	LOCATION_CONF=$(dasel -f $BACKUP_CONF -p toml "machine.locations.[$i]") || invalid_so_exit  # Required
+	LOCATION_PATH=$(dasel -f $BACKUP_CONF -p toml "machine.locations.[$i].path") || invalid_so_exit  # Required
+	RSYNC_ARGS=$(dasel -f $BACKUP_CONF -p toml "machine.locations.[$i].rsync_args")
+	MANUAL=$(dasel -f $BACKUP_CONF -p toml "machine.locations.[$i].manual" || echo false)
+
+	if [[ $(lower $MANUAL) == "true" ]]; then
+		if [[ $RUN_MANUAL == 0 ]]; then
+			echo -e "${YELLOW}Not backing up $LOCATION_PATH:    Use -m to run locations marked with manual.${NC}"
+			continue;
+		fi
+		# echo "Do you want to backup $LOCATION_PATH [Y/n]?"
+		# read response
+		# if [[ $(lower $response) != "y" ]]; then continue; fi
+	fi
+	BACKED_UP+=("$LOCATION_PATH")
+	# --crtimes not supported for some reason
+	echo rsync -rv $RSYNC_ARGS --times --atimes $LOCATION_PATH $BACKUP_TARGET
+	time rsync -rv $RSYNC_ARGS --times --atimes $LOCATION_PATH $BACKUP_TARGET
+done
+
+echo ""
+echo "rsync complete."
+echo "Diffs between source and backup:"
+echo ""
+
+time {
+  for subject in ${BACKED_UP[@]}; do
+    echo "$subject vs $BACKUP_TARGET/$(basename $subject):"
+    local_diff_dirs_names_only $subject $BACKUP_TARGET/$(basename $subject)
+    echo ""
+  done
+}

@@ -1,0 +1,57 @@
+#!/bin/bash
+
+PLUGINS_DIR=$HOME/opt/qcad-3.27.9-trial-linux-qt5.14-x86_64/plugins
+
+PLUGINS=(
+    # $PLUGINS_DIR/libqcaddarkstyle.so  # dark style doesn't close the app
+    $PLUGINS_DIR/libqcaddwg.so
+    $PLUGINS_DIR/libqcadpdf.so
+    $PLUGINS_DIR/libqcadpolygon.so
+    $PLUGINS_DIR/libqcadproj.so
+    $PLUGINS_DIR/libqcadproscripts.so
+    $PLUGINS_DIR/libqcadshp.so
+    $PLUGINS_DIR/libqcadspatialindexpro.so
+    $PLUGINS_DIR/libqcadtrace.so
+    $PLUGINS_DIR/libqcadtriangulation.so
+)
+
+
+REMOVE=0
+ADD=0
+
+function help() {
+    echo "Remove or add the qcad pro plugins."
+    echo "-r	Remove the plugins to $STORE_DIR"
+    echo "-a	Add the plugins back from $STORE_DIR"
+}
+
+while getopts "hra" arg; do
+	case $arg in
+		h) # display Help
+        	help
+        	exit;;
+	  	r)
+			REMOVE=1
+			;;
+	  	a)
+			ADD=1
+			;;
+     	\j?) # Invalid arg
+        	echo "Error: Invalid arg"
+        	exit;;
+	esac
+done
+
+if [[ $REMOVE == $ADD ]]; then
+    help
+    exit 1
+fi
+STORE_DIR=$HOME/.qcadplugins_store
+if [[ $REMOVE == 1 ]]; then
+    mkdir -p $STORE_DIR > /dev/null
+    for p in ${PLUGINS[@]}; do
+        mv $p $STORE_DIR/
+    done
+else
+    cp $STORE_DIR/*.so $PLUGINS_DIR/
+fi

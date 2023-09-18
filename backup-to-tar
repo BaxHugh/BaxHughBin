@@ -1,0 +1,115 @@
+#!/bin/bash
+
+ADDITIONAL_TAR_ARGS_DIRECTIVE="TAR_ARGS="
+
+function help() {
+    echo "Backup the directories and files listed in ~/.backup.conf.
+input file, i.e. ~/.backup.conf should be a list of absolute paths of directories and files
+to backup.
+
+
+Caches and version control directories are excluded from the backup. see -g flag to include '.git' directories.
+    
+    -i    Optional input file instead of ~/.backup.conf.
+    -o    Optional place to output backup. Default is in /tmp
+    -g    Optional include '.git' directories. Default behaviour is to exclude '.git' to save space under the assumption the contents is on a remote somewhere.
+          The parent directory to '.git' is backed up regardless.
+
+.backup.conf format:
+- Lines beginning with '#' in ~/.backup.conf are treated as comments.
+- Additional tar args can be added with i.e. '$ADDITIONAL_TAR_ARGS_DIRECTIVE --exclude='*.foo' --exclude'*.bar'
+"
+}
+
+while getopts "hi:o:g" arg; do
+    case $arg in
+        h) # display Help
+            help
+            exit;;
+        i) # optionl config file
+            BACKUP_CONF=$OPTARG
+            ;;
+        o) # optional specify output
+            BACKUP_PATH_ROOT=$OPTARG
+            ;;
+        g) # optional include .git
+            INCLUDE_GIT_DIR=1
+            ;;
+        \j?) # Invalid arg
+            echo "Error: Invalid arg"
+            help
+            exit;;
+    esac
+done
+
+if [ -z $BACKUP_CONF ]; then
+    BACKUP_CONF="$HOME/.backup.conf"
+fi
+
+
+if [ ! -z $BACKUP_PATH_ROOT ]; then
+    BACKUP_PATH=$BACKUP_PATH_ROOT/backup-$(date -I)
+    BACKUP_SINGLE_FILES_PATH=$BACKUP_PATH_ROOT/backup-$(date -I)-single-files
+else
+    BACKUP_PATH=/tmp/backup-$(date -I)
+    BACKUP_SINGLE_FILES_PATH=/tmp/backup-$(date -I)-single-files
+fi
+
+if [[ -d $BACKUP_SINGLE_FILES_PATH ]]; then rm -r $BACKUP_SINGLE_FILES_PATH; fi  # remove from previous runs
+
+
+ADDITIONAL_TAR_ARGS=$(grep $ADDITIONAL_TAR_ARGS_DIRECTIVE $BACKUP_CONF | sed "s#$ADDITIONAL_TAR_ARGS_DIRECTIVE##g" | grep -v '#')
+
+if [[ $ADDITIONAL_TAR_ARGS != "" ]]; then
+    echo "Using additional tar arguments: $ADDITIONAL_TAR_ARGS"
+fi
+
+TAR_ARGS="--exclude-backups --exclude-caches-all --exclude-vcs --exclude='.venv' --exclude='__pycache__'"
+if [ -z $INCLUDE_GIT_DIR ]; then
+    TAR_ARGS="$TAR_ARGS --exclude='.git'"
+fi
+TAR_ARGS="$TAR_ARGS $ADDITIONAL_TAR_ARGS"
+
+echo "Using tar with arguments \"$TAR_ARGS\""
+
+
+# contents of BACKUP_CONF expected to be list of paths, where each line is a path and nothing more
+
+mkdir $BACKUP_PATH
+while read -r path; do
+    if [[ $path == "" ]]; then continue; fi  # ignore empty lines
+    # Skip comments
+    if [[ $(echo $path | awk '{printf $1}') == "#" ]]; then continue; fi
+    # Skip additional args directive
+    if [[ $(echo $path | awk '{printf $1}') == "$ADDITIONAL_TAR_ARGS_DIRECTIVE" ]]; then continue; fi
+
+    # tar directories
+    if [ -d $path ]; then
+        echo "tarring : $path"
+        echo
+        # echo "tar -czvf $BACKUP_PATH/$(basename $path).tar.gz $TAR_ARGS $path"
+        # tar is sketchy, and doesn't seem to work with TAR_ARGS macro expansion, so eval fixes this.
+        eval "tar -czvf $BACKUP_PATH/$(basename $path).tar.gz $TAR_ARGS $path"
+    # save individual files
+    elif [ -f $path ]; then
+        echo "copying : $path"
+        echo
+        if [[ ! -d $BACKUP_SINGLE_FILES_PATH ]]; then
+            mkdir $BACKUP_SINGLE_FILES_PATH
+        fi
+        mkdir -p $BACKUP_SINGLE_FILES_PATH/$(dirname $path)
+        cp $path $BACKUP_SINGLE_FILES_PATH/$path
+    fi
+
+done < $BACKUP_CONF
+
+#  Tar individual files together
+if [[ -d $BACKUP_SINGLE_FILES_PATH ]]; then
+    tar -czvf $BACKUP_PATH/other-files.tar.gz $BACKUP_SINGLE_FILES_PATH
+fi
+
+echo "tarring the tars"
+echo
+tar -cvf $BACKUP_PATH.tar.gz $BACKUP_PATH  # Note: Not passing through gzip
+echo ""
+echo "Created backup at $BACKUP_PATH / $BACKUP_PATH.tar.gz"
