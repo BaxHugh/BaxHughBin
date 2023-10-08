@@ -23,6 +23,6 @@ DCIM=$(cd $GVFS/*/DCIM && pwd)
 echo "Using DCIM path: $DCIM"
 # Eclude live photo videos
 #rsync --ignore-existing --exclude IMG*.MOV --exclude *.AAE -r $DCIM $1 > ~/DCIM.log
-rsync --ignore-existing -r $DCIM $1 > ~/DCIM.log
+rsync --ignore-existing -r $DCIM $1 &> ~/DCIM.log
 
 echo "Done. See ~/DCIM.log for errors and files which weren't copied."
