@@ -1,0 +1,124 @@
+#!python3
+
+import ast
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from treelib import Tree
+
+
+@dataclass
+class ModuleNode:
+    name: str
+    docstring: str | None
+
+
+@dataclass
+class ModuleDisplayNode:
+    display_content: str
+
+
+def get_module_docstring(module_path: Path) -> str | None:
+    if module_path.is_file():
+        with module_path.open("r", encoding="utf-8") as file:
+            node = ast.parse(file.read())
+            return ast.get_docstring(node)
+    elif module_path.is_dir():
+        init_file = module_path / "__init__.py"
+        if init_file.exists():
+            with init_file.open("r", encoding="utf-8") as file:
+                node = ast.parse(file.read())
+                return ast.get_docstring(node)
+    return None
+
+
+def walk_module_tree(root_path: Path) -> Tree:
+    tree = Tree()
+    root_node = ModuleNode(root_path.name, get_module_docstring(root_path))
+    tree.create_node(
+        tag=root_node.name,
+        identifier=root_node.name,
+        data=root_node,
+    )
+
+    for file_path in root_path.rglob("*.py"):
+        relative_path = file_path.relative_to(root_path)
+        parts = relative_path.with_suffix("").as_posix().split("/")
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        docstring = get_module_docstring(file_path)
+        parent = root_node.name
+        for i, part in enumerate(parts):
+            qualified_name = "/".join(parts[: i + 1])
+            if not tree.contains(qualified_name):
+                module_node = ModuleNode(part, docstring)
+                tree.create_node(
+                    tag=part,
+                    identifier=qualified_name,
+                    parent=parent,
+                    data=module_node,
+                )
+            parent = qualified_name
+
+    return tree
+
+
+def module_tree_to_display_tree(tree: Tree) -> Tree:
+    def get_longest_name_line_length(tree: Tree) -> int:
+        show = tree.show(stdout=False, data_property="name")
+        lines = show.split("\n")
+        return max(len(line) for line in lines)
+
+    def create_display_line(longest_name_line_length: int, node_name: str, docstring: str | None, _indent: int) -> str:
+        # get the first line of the docstring only
+        docstring_summary_line = docstring.split("\n")[0] if docstring else "undocumented"
+        # Note: to justify the docstring to the right, change to longest_name_line_length - _indent
+        # Submodules seem more readable when the submodule docstrings are also indented, so not doing this.
+        return f'{node_name:<{longest_name_line_length}}    """{docstring_summary_line}"""'
+
+    display_tree = Tree()
+    longest_name_line_length = get_longest_name_line_length(tree)
+    for node in tree.all_nodes_itr():
+        module_node = node.data
+        display_content = create_display_line(
+            longest_name_line_length,
+            node.tag,
+            module_node.docstring,
+            tree.level(node.identifier) * 4,
+        )
+        display_node = ModuleDisplayNode(display_content)
+        if node.is_root():
+            display_tree.create_node(node.tag, node.identifier, data=display_node)
+        else:
+            display_tree.create_node(
+                node.tag,
+                node.identifier,
+                parent=node.predecessor(tree_id=tree.identifier),
+                data=display_node,
+            )
+    return display_tree
+
+
+def print_module_tree(tree: Tree) -> None:
+    display_tree = module_tree_to_display_tree(tree)
+    print(display_tree.show(data_property="display_content", stdout=False))
+
+
+def main(module_path: Path) -> None:
+    if not module_path.is_dir():
+        print(f"Error: {module_path} is not a directory.")
+        return
+
+    module_tree = walk_module_tree(module_path)
+    print_module_tree(module_tree)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python python-package-summary.py <module_path>")
+        print("Generates a summary of the Python package structure and docstrings.")
+    else:
+        print(sys.argv[1])
+        main(Path(sys.argv[1]))
