@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# Script to restore from tar --listed-incremental backups
+
+# --- Configuration & Defaults ---
+SOURCE_DIR=""
+DEST_DIR=""
+LIST_ONLY=0
+UPTO_ARCHIVE_BASENAME="" # Basename of archive, e.g., backup_2025-06-05_123000_INCR
+PATH_TO_RESTORE=""       # Specific path(s) within the archive to restore
+
+recho() {
+    echo -e "\e[31m$1\e[0m"
+}
+gecho() {
+    echo -e "\e[32m$1\e[0m"
+}
+
+
+help() {
+    echo "Restores files from a sequence of tar incremental backups."
+    echo
+    echo "Usage: $0 -s <backup_source_dir> -d <restore_destination_dir> [options]"
+    echo
+    echo "Mandatory arguments:"
+    echo "  -s <dir>      Source directory containing the backup .tar.gz files."
+    echo "  -d <dir>      Destination directory to restore files into. Must be empty or non-existent (will be created)."
+    echo
+    echo "Optional arguments:"
+    echo "  -l            List available backup archives in chronological order and exit."
+    echo "  -u <basename> Restore up to and including this archive basename (e.g., 'backup_2025-06-05_123000_INCR')."
+    echo "                Without this, all found archives in sequence will be processed."
+    echo "  -p <path>     Specific path within the archive to restore (e.g., '/home/user/docs/file.txt')."
+    echo "                If omitted, restores everything from the selected archives."
+    echo "  -h            Display this help message and exit."
+    echo
+    echo "Example: $0 -s ~/system_backups -d ~/restore_area -u backup_2025-06-02_100000_INCR -p /home/user/Documents/important_file.txt"
+}
+
+# --- Argument Parsing ---
+while getopts "hs:d:lu:p:" opt; do
+    case $opt in
+        h) help; exit 0 ;;
+        s) SOURCE_DIR=$(realpath "$OPTARG") ;; # Resolve to absolute path
+        d) DEST_DIR="$OPTARG" ;;            # Destination path
+        l) LIST_ONLY=1 ;;
+        u) UPTO_ARCHIVE_BASENAME="$OPTARG" ;;
+        p) PATH_TO_RESTORE="$OPTARG" ;;
+        \?) echo "Invalid option: -$OPTARG" >&2; help; exit 1 ;;
+        :) echo "Option -$OPTARG requires an argument." >&2; help; exit 1;;
+    esac
+done
+
+# --- Validate Mandatory Arguments (if not just listing) ---
+if [ $LIST_ONLY -eq 0 ]; then
+    if [ -z "$SOURCE_DIR" ]; then
+        recho "Error: Source directory (-s) is mandatory." >&2
+        help
+        exit 1
+    fi
+    if [ ! -d "$SOURCE_DIR" ]; then
+        recho "Error: Source directory '$SOURCE_DIR' not found." >&2
+        exit 1
+    fi
+    if [ -z "$DEST_DIR" ]; then
+        recho "Error: Destination directory (-d) is mandatory for restore." >&2
+        help
+        exit 1
+    fi
+else # LIST_ONLY is 1
+    if [ -z "$SOURCE_DIR" ]; then # Source dir is also needed for listing
+        recho "Error: Source directory (-s) is mandatory for listing backups." >&2
+        help
+        exit 1
+    fi
+     if [ ! -d "$SOURCE_DIR" ]; then
+        recho "Error: Source directory '$SOURCE_DIR' not found." >&2
+        exit 1
+    fi
+fi
+
+
+# --- Find and Sort Backup Archives ---
+# Read null-delimited file list from find | sort -z into an array
+sorted_archives=()
+while IFS= read -r -d $'\0' file; do
+    sorted_archives+=("$file")
+done < <(find "$SOURCE_DIR" -maxdepth 1 -type f -name "backup_*.tar.gz" -print0 | sort -z)
+
+if [ ${#sorted_archives[@]} -eq 0 ]; then
+    echo "No backup archives found in '$SOURCE_DIR' matching pattern 'backup_*.tar.gz'."
+    exit 1
+fi
+
+# --- List Only Mode ---
+if [ $LIST_ONLY -eq 1 ]; then
+    echo "Available backup archives in '$SOURCE_DIR' (chronological order):"
+    for archive_path in "${sorted_archives[@]}"; do
+        echo "  $(basename "$archive_path")"
+    done
+    exit 0
+fi
+
+# --- Prepare Destination Directory for Restore ---
+if [ ! -d "$DEST_DIR" ]; then
+    echo "Destination directory '$DEST_DIR' does not exist. Creating it..."
+    if ! mkdir -p "$DEST_DIR"; then
+        recho "Error: Could not create destination directory '$DEST_DIR'." >&2
+        exit 1
+    fi
+    echo "Destination directory '$DEST_DIR' created."
+elif [ "$(ls -A "$DEST_DIR")" ]; then # Check if directory is not empty
+    recho "Error: Destination directory '$DEST_DIR' is not empty." >&2
+    recho "Please specify an empty directory or a path for a new directory."
+    exit 1
+else
+    echo "Using existing empty destination directory: '$DEST_DIR'"
+fi
+DEST_DIR=$(realpath "$DEST_DIR") # Resolve to absolute path for clarity in messages
+
+# --- Filter Archives by UPTO_ARCHIVE_BASENAME if specified ---
+archives_to_process=()
+if [ -n "$UPTO_ARCHIVE_BASENAME" ]; then
+    found_upto_flag=0
+    for archive_path in "${sorted_archives[@]}"; do
+        current_basename=$(basename "$archive_path" .tar.gz)
+        archives_to_process+=("$archive_path")
+        if [[ "$current_basename" == "$UPTO_ARCHIVE_BASENAME" ]]; then
+            found_upto_flag=1
+            break # Stop adding once we've included the "upto" archive
+        fi
+    done
+    if [ $found_upto_flag -eq 0 ]; then
+        recho "Error: Specified 'upto' archive basename '$UPTO_ARCHIVE_BASENAME' not found in the sequence." >&2
+        exit 1
+    fi
+else
+    archives_to_process=("${sorted_archives[@]}") # Process all found archives
+fi
+
+if [ ${#archives_to_process[@]} -eq 0 ]; then
+    echo "No archives selected for processing. Check your -u option if used." >&2
+    exit 1
+fi
+
+# --- Validate the Archive Sequence ---
+first_archive_to_process="${archives_to_process[0]}"
+if [[ ! "$first_archive_to_process" == *"_FULL.tar.gz" ]]; then
+    recho "Error: The first archive in the sequence to be restored ('$(basename "$first_archive_to_process")') is not a FULL backup." >&2
+    echo "A restoration sequence must begin with a FULL backup."
+    exit 1
+fi
+
+# --- Confirm Before Restoration ---
+echo "-----------------------------------------------------"
+echo "The following archives will be processed in order:"
+for archive_path in "${archives_to_process[@]}"; do
+    echo "  - $(basename "$archive_path")"
+done
+echo "Restoration target directory: $DEST_DIR"
+if [ -n "$PATH_TO_RESTORE" ]; then
+    echo "Specifically restoring path(s): '$PATH_TO_RESTORE'"
+fi
+echo "-----------------------------------------------------"
+read -r -p "Proceed with restoration? (yes/no): " confirm
+if [[ "$confirm" != "yes" ]]; then
+    echo "Restoration aborted by user."
+    exit 0
+fi
+
+# --- Iterate and Extract ---
+echo "Starting restoration..."
+for archive_path in "${archives_to_process[@]}"; do
+    echo "-----------------------------------------------------"
+    echo "Processing: $(basename "$archive_path")"
+
+    # Prepare arguments for tar. Store PATH_TO_RESTORE in an array
+    # to handle cases where it's empty or contains spaces correctly.
+    tar_path_args=()
+    if [ -n "$PATH_TO_RESTORE" ]; then
+        tar_path_args+=("$PATH_TO_RESTORE")
+    fi
+
+    # The --listed-incremental=/dev/null is equivalent to -G and tells tar it's an incremental archive
+    # -p preserves permissions
+    # -x extract, -z gzip, -f file
+    echo "Executing: tar -xGzpf \"$archive_path\" -C \"$DEST_DIR\" --listed-incremental=/dev/null ${tar_path_args[@]:+${tar_path_args[@]}}"
+    if tar -xGzpf "$archive_path" -C "$DEST_DIR" --listed-incremental=/dev/null "${tar_path_args[@]}"; then
+        echo "Successfully processed $(basename "$archive_path")."
+    else
+        TAR_EXTRACT_EC=$?
+        recho "Error (code $TAR_EXTRACT_EC) processing $(basename "$archive_path"). Check messages above." >&2
+        read -r -p "Continue with remaining archives? (yes/no): " continue_on_error
+        if [[ "$continue_on_error" != "yes" ]]; then
+            echo "Restoration aborted due to error." >&2
+            exit 1
+        fi
+        echo "Continuing despite error..."
+    fi
+done
+
+gecho "-----------------------------------------------------"
+gecho "Restoration process finished."
+gecho "Restored files (if any) are in: $DEST_DIR"
+gecho "Please verify the contents."
+exit 0

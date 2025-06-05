@@ -1,115 +1,198 @@
 #!/bin/bash
 
 ADDITIONAL_TAR_ARGS_DIRECTIVE="TAR_ARGS="
+DEFAULT_BACKUP_DEST_DIR="$HOME/system_backups" # CHANGED: Default to a persistent location
 
-function help() {
-    echo "Backup the directories and files listed in ~/.backup.conf.
-input file, i.e. ~/.backup.conf should be a list of absolute paths of directories and files
-to backup.
-
-
-Caches and version control directories are excluded from the backup. see -g flag to include '.git' directories.
-    
-    -i    Optional input file instead of ~/.backup.conf.
-    -o    Optional place to output backup. Default is in /tmp
-    -g    Optional include '.git' directories. Default behaviour is to exclude '.git' to save space under the assumption the contents is on a remote somewhere.
-          The parent directory to '.git' is backed up regardless.
-
-.backup.conf format:
-- Lines beginning with '#' in ~/.backup.conf are treated as comments.
-- Additional tar args can be added with i.e. '$ADDITIONAL_TAR_ARGS_DIRECTIVE --exclude='*.foo' --exclude'*.bar'
-"
+gecho() {
+    echo -e "\033[1;32m$1\033[0m"
 }
+recho() {
+    echo -e "\033[1;31m$1\033[0m"
+}
+yecho() {
+    echo -e "\033[1;33m$1\033[0m"
+}
+
+help() {
+    echo "Backup the directories and files listed in a configuration file using an incremental strategy."
+    echo "A full backup is created initially, followed by smaller incremental backups."
+    echo "Each run produces a single .tar.gz archive to be uploaded manually."
+    echo "Caches and version control directories are excluded from the backup. see -g flag to include '.git' directories."
+    echo
+    echo "Input file format (e.g., ~/.backup.conf):"
+    echo "- List absolute paths of directories and files to backup, one per line."
+    echo "- Lines beginning with '#' are comments."
+    echo "- Additional tar args can be added with: '$ADDITIONAL_TAR_ARGS_DIRECTIVE --exclude=\"*.foo\" --exclude=\"*.bar\"'"
+    echo
+    echo "Options:"
+    echo "    -h    Display this help message."
+    echo "    -i    Optional input configuration file (default: ~/.backup.conf)."
+    echo "    -o    Optional output directory for archives and snapshot file (default: $DEFAULT_BACKUP_DEST_DIR)."
+    echo "    -g    Optional: Include '.git' directories (default: excluded)."
+    echo
+    echo "IMPORTANT: The output directory must be persistent for incremental backups to work across runs."
+}
+
+# --- Argument Parsing (from your script) ---
+BACKUP_CONF="$HOME/.backup.conf"
+BACKUP_DEST_DIR="$DEFAULT_BACKUP_DEST_DIR"
+INCLUDE_GIT_DIR=0 # 0 for false (exclude .git), 1 for true (include .git)
 
 while getopts "hi:o:g" arg; do
     case $arg in
         h) # display Help
             help
-            exit;;
-        i) # optionl config file
+            exit 0
+            ;;
+        i) # optional config file
             BACKUP_CONF=$OPTARG
             ;;
-        o) # optional specify output
-            BACKUP_PATH_ROOT=$OPTARG
+        o) # optional specify output directory
+            BACKUP_DEST_DIR=$OPTARG
             ;;
-        g) # optional include .git
+        g) # optional include .git directories
             INCLUDE_GIT_DIR=1
             ;;
-        \j?) # Invalid arg
-            echo "Error: Invalid arg"
+        \?) # Invalid arg
+            echo "Error: Invalid argument" >&2
             help
-            exit;;
+            exit 1
+            ;;
     esac
 done
 
-if [ -z $BACKUP_CONF ]; then
-    BACKUP_CONF="$HOME/.backup.conf"
+# --- Validations ---
+if [ ! -f "$BACKUP_CONF" ]; then
+    echo "Error: Backup configuration file not found: $BACKUP_CONF" >&2
+    exit 1
 fi
 
-
-if [ ! -z $BACKUP_PATH_ROOT ]; then
-    BACKUP_PATH=$BACKUP_PATH_ROOT/backup-$(date -I)
-    BACKUP_SINGLE_FILES_PATH=$BACKUP_PATH_ROOT/backup-$(date -I)-single-files
-else
-    BACKUP_PATH=/tmp/backup-$(date -I)
-    BACKUP_SINGLE_FILES_PATH=/tmp/backup-$(date -I)-single-files
+mkdir -p "$BACKUP_DEST_DIR"
+if [ ! -d "$BACKUP_DEST_DIR" ] || [ ! -w "$BACKUP_DEST_DIR" ]; then
+    echo "Error: Backup destination directory is not accessible or writable: $BACKUP_DEST_DIR" >&2
+    exit 1
 fi
 
-if [[ -d $BACKUP_SINGLE_FILES_PATH ]]; then rm -r $BACKUP_SINGLE_FILES_PATH; fi  # remove from previous runs
+# --- File Definitions ---
+SNAPSHOT_FILE="$BACKUP_DEST_DIR/backup_snapshot.snar"
+TMP_SOURCES_LIST=$(mktemp) # Temporary file for tar --files-from
+DATE=$(date +%Y-%m-%d_%H%M%S) # More precise timestamp for archive names
 
+# --- Process Configuration File ---
+echo "Processing configuration file: $BACKUP_CONF"
+ADDITIONAL_TAR_ARGS_FROM_CONF=""
+found_directive=0
 
-ADDITIONAL_TAR_ARGS=$(grep $ADDITIONAL_TAR_ARGS_DIRECTIVE $BACKUP_CONF | sed "s#$ADDITIONAL_TAR_ARGS_DIRECTIVE##g" | grep -v '#')
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # Trim leading/trailing whitespace (optional, but good practice)
+    path=$(echo "$line" | awk '{$1=$1};1')
 
-if [[ $ADDITIONAL_TAR_ARGS != "" ]]; then
-    echo "Using additional tar arguments: $ADDITIONAL_TAR_ARGS"
-fi
-
-TAR_ARGS="--exclude-backups --exclude-caches-all --exclude-vcs --exclude='.venv' --exclude='__pycache__'"
-if [ -z $INCLUDE_GIT_DIR ]; then
-    TAR_ARGS="$TAR_ARGS --exclude='.git'"
-fi
-TAR_ARGS="$TAR_ARGS $ADDITIONAL_TAR_ARGS"
-
-echo "Using tar with arguments \"$TAR_ARGS\""
-
-
-# contents of BACKUP_CONF expected to be list of paths, where each line is a path and nothing more
-
-mkdir $BACKUP_PATH
-while read -r path; do
-    if [[ $path == "" ]]; then continue; fi  # ignore empty lines
-    # Skip comments
-    if [[ $(echo $path | awk '{printf $1}') == "#" ]]; then continue; fi
-    # Skip additional args directive
-    if [[ $(echo $path | awk '{printf $1}') == "$ADDITIONAL_TAR_ARGS_DIRECTIVE" ]]; then continue; fi
-
-    # tar directories
-    if [ -d $path ]; then
-        echo "tarring : $path"
-        echo
-        # echo "tar -czvf $BACKUP_PATH/$(basename $path).tar.gz $TAR_ARGS $path"
-        # tar is sketchy, and doesn't seem to work with TAR_ARGS macro expansion, so eval fixes this.
-        eval "tar -czvf $BACKUP_PATH/$(basename $path).tar.gz $TAR_ARGS $path"
-    # save individual files
-    elif [ -f $path ]; then
-        echo "copying : $path"
-        echo
-        if [[ ! -d $BACKUP_SINGLE_FILES_PATH ]]; then
-            mkdir $BACKUP_SINGLE_FILES_PATH
-        fi
-        mkdir -p $BACKUP_SINGLE_FILES_PATH/$(dirname $path)
-        cp $path $BACKUP_SINGLE_FILES_PATH/$path
+    if [[ -z "$path" ]] || [[ "$path" =~ ^# ]]; then # Skip empty lines and comments
+        continue
     fi
 
-done < $BACKUP_CONF
+    if [[ "$path" =~ ^${ADDITIONAL_TAR_ARGS_DIRECTIVE} ]]; then
+        if [ $found_directive -eq 0 ]; then
+            ADDITIONAL_TAR_ARGS_FROM_CONF=$(echo "$path" | sed "s#^${ADDITIONAL_TAR_ARGS_DIRECTIVE}##")
+            echo "Found additional tar arguments in config: $ADDITIONAL_TAR_ARGS_FROM_CONF"
+            found_directive=1
+        else
+            yecho "Warning: Multiple '$ADDITIONAL_TAR_ARGS_DIRECTIVE' lines found. Using the first one." >&2
+        fi
+        continue # Directive line is not a path to backup
+    fi
 
-#  Tar individual files together
-if [[ -d $BACKUP_SINGLE_FILES_PATH ]]; then
-    tar -czvf $BACKUP_PATH/other-files.tar.gz $BACKUP_SINGLE_FILES_PATH
+    # Check if path exists before adding to list
+    if [ -e "$path" ]; then
+        echo "$path" >> "$TMP_SOURCES_LIST"
+    else
+        yecho "Warning: Path specified in $BACKUP_CONF not found, skipping: '$path'" >&2
+    fi
+done < "$BACKUP_CONF"
+
+if [ ! -s "$TMP_SOURCES_LIST" ]; then
+    echo "Error: No valid source files or directories found to back up. Check $BACKUP_CONF." >&2
+    rm "$TMP_SOURCES_LIST"
+    exit 1
 fi
 
-echo "tarring the tars"
-echo
-tar -cvf $BACKUP_PATH.tar.gz $BACKUP_PATH  # Note: Not passing through gzip
-echo ""
-echo "Created backup at $BACKUP_PATH / $BACKUP_PATH.tar.gz"
+# --- Prepare Tar Arguments ---
+# Start with an array for safety, though eval will be used for the final string
+# Standard excludes
+TAR_CMD_ARGS_STR="--exclude-backups --exclude-caches-all --exclude-vcs --exclude='.venv' --exclude='__pycache__'"
+
+if [ "$INCLUDE_GIT_DIR" -eq 0 ]; then
+    TAR_CMD_ARGS_STR="$TAR_CMD_ARGS_STR --exclude='.git'"
+fi
+
+# Append args from config file
+if [[ -n "$ADDITIONAL_TAR_ARGS_FROM_CONF" ]]; then
+    TAR_CMD_ARGS_STR="$TAR_CMD_ARGS_STR $ADDITIONAL_TAR_ARGS_FROM_CONF"
+fi
+
+echo "Final combined tar arguments: $TAR_CMD_ARGS_STR"
+
+# --- Determine Archive Name and Type ---
+ARCHIVE_BASENAME="backup_${DATE}"
+if [ ! -f "$SNAPSHOT_FILE" ]; then
+    ARCHIVE_BASENAME="${ARCHIVE_BASENAME}_FULL"
+    echo "Snapshot file not found. Creating a new FULL backup."
+else
+    ARCHIVE_BASENAME="${ARCHIVE_BASENAME}_INCR"
+    echo "Snapshot file found. Creating an INCREMENTAL backup."
+fi
+FULL_ARCHIVE_PATH="$BACKUP_DEST_DIR/${ARCHIVE_BASENAME}.tar.gz"
+
+# --- Create the Backup ---
+echo "Starting backup..."
+echo "  Archive will be: $FULL_ARCHIVE_PATH"
+echo "  Snapshot file:   $SNAPSHOT_FILE"
+echo "  Sources list:    $TMP_SOURCES_LIST"
+
+# Using eval to correctly interpret the TAR_CMD_ARGS_STR, similar to your original script.
+# Ensure paths with spaces are handled by quoting file variables.
+eval "tar --create \
+    --file=\"$FULL_ARCHIVE_PATH\" \
+    --listed-incremental=\"$SNAPSHOT_FILE\" \
+    --files-from=\"$TMP_SOURCES_LIST\" \
+    $TAR_CMD_ARGS_STR \
+    --gzip \
+    --absolute-names" # Assumes paths in config are absolute and should be stored as such
+
+TAR_EXIT_CODE=$?
+
+# --- Cleanup and Report ---
+rm "$TMP_SOURCES_LIST"
+
+if [ $TAR_EXIT_CODE -eq 0 ] || [ $TAR_EXIT_CODE -eq 1 ]; then # 0=success, 1=files changed during archive
+    if [ -s "$FULL_ARCHIVE_PATH" ]; then # Check if archive was created and is not empty
+        gecho "-------------------------------------------------------------"
+        gecho "Backup SUCCEEDED (tar exit code: $TAR_EXIT_CODE)."
+        gecho "Archive created: $FULL_ARCHIVE_PATH"
+        gecho "Remember to UPLOAD THIS FILE to where you store backups."
+        gecho "-------------------------------------------------------------"
+        if [ $TAR_EXIT_CODE -eq 1 ]; then
+            yecho "Warning: Some files may have changed during archiving." >&2
+        fi
+    elif [ $TAR_EXIT_CODE -eq 0 ]; then # tar succeeded but archive is empty (or very small)
+        gecho "-------------------------------------------------------------"
+        gecho "Backup SUCCEEDED (tar exit code: $TAR_EXIT_CODE)."
+        gecho "Archive created: $FULL_ARCHIVE_PATH"
+        gecho "(Archive might be empty or very small if no files changed since last backup)."
+        gecho "Remember to UPLOAD THIS FILE to where you store backups."
+        gecho "-------------------------------------------------------------"
+    else # Should not happen if TAR_EXIT_CODE is 0 or 1
+        recho "Error: Backup succeeded (code $TAR_EXIT_CODE) but archive is empty/missing: $FULL_ARCHIVE_PATH" >&2
+        exit 1
+    fi
+else
+    recho "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    recho "Backup FAILED (tar exit code: $TAR_EXIT_CODE)."
+    recho "Archive may not have been created or is incomplete: $FULL_ARCHIVE_PATH"
+    recho "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    # Attempt to clean up potentially incomplete archive
+    [ -f "$FULL_ARCHIVE_PATH" ] && rm "$FULL_ARCHIVE_PATH"
+    exit 1
+fi
+
+exit 0
