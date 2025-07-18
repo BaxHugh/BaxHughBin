@@ -140,6 +140,10 @@ if [ ! -f "$SNAPSHOT_FILE" ]; then
 else
     ARCHIVE_BASENAME="${ARCHIVE_BASENAME}_INCR"
     echo "Snapshot file found. Creating an INCREMENTAL backup."
+    
+    # Create a backup of the snapshot file in case there are errors during tar
+    SNAPSHOT_BACKUP_FILE="${SNAPSHOT_FILE}.backup.$$"
+    cp "$SNAPSHOT_FILE" "$SNAPSHOT_BACKUP_FILE"
 fi
 FULL_ARCHIVE_PATH="$BACKUP_DEST_DIR/${ARCHIVE_BASENAME}.tar.gz"
 
@@ -152,10 +156,10 @@ echo "  Sources list:    $TMP_SOURCES_LIST"
 # Using eval to correctly interpret the TAR_CMD_ARGS_STR, similar to your original script.
 # Ensure paths with spaces are handled by quoting file variables.
 eval "tar --create \
+    $TAR_CMD_ARGS_STR \
     --file=\"$FULL_ARCHIVE_PATH\" \
     --listed-incremental=\"$SNAPSHOT_FILE\" \
     --files-from=\"$TMP_SOURCES_LIST\" \
-    $TAR_CMD_ARGS_STR \
     --gzip \
     --absolute-names" # Assumes paths in config are absolute and should be stored as such
 
@@ -164,8 +168,23 @@ TAR_EXIT_CODE=$?
 # --- Cleanup and Report ---
 rm "$TMP_SOURCES_LIST"
 
+# Function to cleanup snapshot backup
+cleanup_snapshot_backup() {
+    if [ -n "$SNAPSHOT_BACKUP_FILE" ] && [ -f "$SNAPSHOT_BACKUP_FILE" ]; then
+        rm "$SNAPSHOT_BACKUP_FILE"
+    fi
+}
+
+# Function to restore snapshot from backup
+restore_snapshot_backup() {
+    if [ -n "$SNAPSHOT_BACKUP_FILE" ] && [ -f "$SNAPSHOT_BACKUP_FILE" ]; then
+        mv "$SNAPSHOT_BACKUP_FILE" "$SNAPSHOT_FILE"
+    fi
+}
+
 if [ $TAR_EXIT_CODE -eq 0 ] || [ $TAR_EXIT_CODE -eq 1 ]; then # 0=success, 1=files changed during archive
     if [ -s "$FULL_ARCHIVE_PATH" ]; then # Check if archive was created and is not empty
+        cleanup_snapshot_backup
         gecho "-------------------------------------------------------------"
         gecho "Backup SUCCEEDED (tar exit code: $TAR_EXIT_CODE)."
         gecho "Archive created: $FULL_ARCHIVE_PATH"
@@ -175,6 +194,7 @@ if [ $TAR_EXIT_CODE -eq 0 ] || [ $TAR_EXIT_CODE -eq 1 ]; then # 0=success, 1=fil
             yecho "Warning: Some files may have changed during archiving." >&2
         fi
     elif [ $TAR_EXIT_CODE -eq 0 ]; then # tar succeeded but archive is empty (or very small)
+        cleanup_snapshot_backup
         gecho "-------------------------------------------------------------"
         gecho "Backup SUCCEEDED (tar exit code: $TAR_EXIT_CODE)."
         gecho "Archive created: $FULL_ARCHIVE_PATH"
@@ -182,13 +202,16 @@ if [ $TAR_EXIT_CODE -eq 0 ] || [ $TAR_EXIT_CODE -eq 1 ]; then # 0=success, 1=fil
         gecho "Remember to UPLOAD THIS FILE to where you store backups."
         gecho "-------------------------------------------------------------"
     else # Should not happen if TAR_EXIT_CODE is 0 or 1
+        restore_snapshot_backup
         recho "Error: Backup succeeded (code $TAR_EXIT_CODE) but archive is empty/missing: $FULL_ARCHIVE_PATH" >&2
         exit 1
     fi
 else
+    restore_snapshot_backup
     recho "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     recho "Backup FAILED (tar exit code: $TAR_EXIT_CODE)."
     recho "Archive may not have been created or is incomplete: $FULL_ARCHIVE_PATH"
+    recho "Snapshot file has been restored to its previous state."
     recho "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     # Attempt to clean up potentially incomplete archive
     [ -f "$FULL_ARCHIVE_PATH" ] && rm "$FULL_ARCHIVE_PATH"
