@@ -21,10 +21,16 @@ GVFS="/run/user/1000/gvfs"
 # This assumes there's only one device at GVFS
 IPHONE_PHOTOS_PATH=$(cd $GVFS/gphoto2:host=Apple_Inc* && pwd)
 
+if [[ $IPHONE_PHOTOS_PATH == "" ]]; then
+   echo "path not found"
+   exit 1
+fi
+
 echo "Using path: $IPHONE_PHOTOS_PATH"
 # Eclude live photo videos
 #rsync --ignore-existing --exclude IMG*.MOV --exclude *.AAE -r $IPHONE_PHOTOS_PATH $1 > ~/iphone-photos-copy.log
-rsync --ignore-existing -r $IPHONE_PHOTOS_PATH/* $1 &> ~/iphone-photos-copy.log
+echo "rsync --ignore-existing -r -v $IPHONE_PHOTOS_PATH/* $1 &> ~/iphone-photos-copy.log"
+rsync --ignore-existing -r -v $IPHONE_PHOTOS_PATH/* $1 &> ~/iphone-photos-copy.log
 cat ~/iphone-photos-copy.log
 
 echo "Done. See ~/iphone-photos-copy.log for errors and files which weren't copied."
