@@ -18,7 +18,8 @@ help() {
     echo "Backup the directories and files listed in a configuration file using an incremental strategy."
     echo "A full backup is created initially, followed by smaller incremental backups."
     echo "Each run produces a single .tar.gz archive to be uploaded manually."
-    echo "Caches and version control directories are excluded from the backup. see -g flag to include '.git' directories."
+    echo "Caches are excluded from the backup. Version control directories such as '.git' are NOT"
+    echo "excluded automatically - use the config directives below if you want them left out."
     echo
     echo "Input file format (e.g., ~/.backup.conf):"
     echo "- List absolute paths of directories and files to backup, one per line."
@@ -32,12 +33,13 @@ help() {
     echo "- Exclude paths may contain wildcards, e.g. '$EXCLUDE_DIRECTIVE ~/code/**/node_modules'."
     echo "  Note that tar's '*' spans '/', so a single '*' already matches any depth;"
     echo "  '/**/' additionally matches zero directories (like a shell globstar)."
+    echo "- '$EXCLUDE_DIRECTIVE' lines are anchored, so a bare name matches nothing. To drop a name at"
+    echo "  any depth, use '$ADDITIONAL_TAR_ARGS_DIRECTIVE --exclude=\".git\"' (or '$EXCLUDE_DIRECTIVE ~/code/**/.git' for one tree)."
     echo
     echo "Options:"
     echo "    -h    Display this help message."
     echo "    -i    Optional input configuration file (default: ~/.backup.conf)."
     echo "    -o    Optional output directory for archives and snapshot file (default: $DEFAULT_BACKUP_DEST_DIR)."
-    echo "    -g    Optional: Include '.git' directories (default: excluded)."
     echo
     echo "IMPORTANT: The output directory must be persistent for incremental backups to work across runs."
 }
@@ -45,9 +47,8 @@ help() {
 # --- Argument Parsing (from your script) ---
 BACKUP_CONF="$HOME/.backup.conf"
 BACKUP_DEST_DIR="$DEFAULT_BACKUP_DEST_DIR"
-INCLUDE_GIT_DIR=0 # 0 for false (exclude .git), 1 for true (include .git)
 
-while getopts "hi:o:g" arg; do
+while getopts "hi:o:" arg; do
     case $arg in
         h) # display Help
             help
@@ -58,9 +59,6 @@ while getopts "hi:o:g" arg; do
             ;;
         o) # optional specify output directory
             BACKUP_DEST_DIR=$OPTARG
-            ;;
-        g) # optional include .git directories
-            INCLUDE_GIT_DIR=1
             ;;
         \?) # Invalid arg
             echo "Error: Invalid argument" >&2
@@ -152,6 +150,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         exclude_path=$(normalise_path "$exclude_path")
         if [[ -z "$exclude_path" ]]; then
             yecho "Warning: Ignoring '$EXCLUDE_DIRECTIVE' line with no path." >&2
+        elif [[ "$exclude_path" != */* ]]; then
+            # Anchored patterns are matched against absolute member names, so a bare
+            # name can never match. Point at the directive that does what they meant.
+            yecho "Warning: '$EXCLUDE_DIRECTIVE $exclude_path' is a bare name and will match nothing." >&2
+            yecho "         Use '$ADDITIONAL_TAR_ARGS_DIRECTIVE --exclude=\"$exclude_path\"' to exclude it at any depth." >&2
         elif [[ "$exclude_path" == *[\*\?\[]* ]]; then
             # A wildcard pattern: no existence check, and expand any '/**/' segments
             expand_globstar "" "$exclude_path" >> "$TMP_EXCLUDES_LIST"
@@ -183,12 +186,9 @@ fi
 
 # --- Prepare Tar Arguments ---
 # Start with an array for safety, though eval will be used for the final string
-# Standard excludes
-TAR_CMD_ARGS_STR="--exclude-backups --exclude-caches-all --exclude-vcs --exclude='.venv' --exclude='__pycache__'"
-
-if [ "$INCLUDE_GIT_DIR" -eq 0 ]; then
-    TAR_CMD_ARGS_STR="$TAR_CMD_ARGS_STR --exclude='.git'"
-fi
+# Standard excludes. Version control directories are deliberately NOT excluded here -
+# that is left to the config's EXCLUDE:/TAR_ARGS= directives.
+TAR_CMD_ARGS_STR="--exclude-backups --exclude-caches-all --exclude='.venv' --exclude='__pycache__'"
 
 # Append args from config file
 if [[ -n "$ADDITIONAL_TAR_ARGS_FROM_CONF" ]]; then
@@ -198,7 +198,8 @@ fi
 # Append the EXCLUDE: paths from the config. '--anchored' makes each pattern match
 # from the start of the (absolute) stored member name, so excluding
 # /home/me/foo/bar/baz leaves /home/me/foo/bar/bat alone. It comes last so it only
-# applies to these patterns and not to the component excludes above ('.git' etc).
+# applies to these patterns and not to the component excludes above ('.venv' etc) or
+# to any --exclude= given via TAR_ARGS=, which must keep matching at any depth.
 if [ -s "$TMP_EXCLUDES_LIST" ]; then
     TAR_CMD_ARGS_STR="$TAR_CMD_ARGS_STR --anchored --exclude-from=\"$TMP_EXCLUDES_LIST\""
 fi
