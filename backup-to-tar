@@ -1,6 +1,7 @@
 #!/bin/bash
 
 ADDITIONAL_TAR_ARGS_DIRECTIVE="TAR_ARGS="
+EXCLUDE_DIRECTIVE="EXCLUDE:"
 DEFAULT_BACKUP_DEST_DIR="$HOME/system_backups" # CHANGED: Default to a persistent location
 
 gecho() {
@@ -23,6 +24,11 @@ help() {
     echo "- List absolute paths of directories and files to backup, one per line."
     echo "- Lines beginning with '#' are comments."
     echo "- Additional tar args can be added with: '$ADDITIONAL_TAR_ARGS_DIRECTIVE --exclude=\"*.foo\" --exclude=\"*.bar\"'"
+    echo "- Paths can be subtracted from the backup with: '$EXCLUDE_DIRECTIVE /path/to/skip'"
+    echo "  An excluded directory (and everything under it) is left out, while its siblings"
+    echo "  remain included, e.g. with '~/foo/bar' included and '$EXCLUDE_DIRECTIVE ~/foo/bar/baz',"
+    echo "  ~/foo/bar/baz is skipped but ~/foo/bar/bat is still backed up."
+    echo "- A leading '~/' is expanded to \$HOME in both included and excluded paths."
     echo
     echo "Options:"
     echo "    -h    Display this help message."
@@ -76,7 +82,27 @@ fi
 # --- File Definitions ---
 SNAPSHOT_FILE="$BACKUP_DEST_DIR/backup_snapshot.snar"
 TMP_SOURCES_LIST=$(mktemp) # Temporary file for tar --files-from
+TMP_EXCLUDES_LIST=$(mktemp) # Temporary file for tar --exclude-from
 DATE=$(date +%Y-%m-%d_%H%M%S) # More precise timestamp for archive names
+
+cleanup_tmp_files() {
+    rm -f "$TMP_SOURCES_LIST" "$TMP_EXCLUDES_LIST"
+}
+trap cleanup_tmp_files EXIT
+
+# Expand a leading '~/' (or a bare '~') to $HOME, and strip trailing slashes
+normalise_path() {
+    local p="$1"
+    case "$p" in
+        "~") p="$HOME" ;;
+        "~/"*) p="$HOME/${p#\~/}" ;;
+    esac
+    # Strip trailing slashes so tar's exclude patterns match directory members
+    while [[ "$p" == */ && "$p" != "/" ]]; do
+        p="${p%/}"
+    done
+    printf '%s' "$p"
+}
 
 # --- Process Configuration File ---
 echo "Processing configuration file: $BACKUP_CONF"
@@ -102,6 +128,23 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         continue # Directive line is not a path to backup
     fi
 
+    if [[ "$path" =~ ^${EXCLUDE_DIRECTIVE} ]]; then
+        exclude_path=$(echo "${path#$EXCLUDE_DIRECTIVE}" | awk '{$1=$1};1')
+        exclude_path=$(normalise_path "$exclude_path")
+        if [[ -z "$exclude_path" ]]; then
+            yecho "Warning: Ignoring '$EXCLUDE_DIRECTIVE' line with no path." >&2
+        else
+            if [ ! -e "$exclude_path" ]; then
+                yecho "Warning: Excluded path does not currently exist: '$exclude_path'" >&2
+            fi
+            echo "$exclude_path" >> "$TMP_EXCLUDES_LIST"
+            echo "Excluding: $exclude_path"
+        fi
+        continue # Directive line is not a path to backup
+    fi
+
+    path=$(normalise_path "$path")
+
     # Check if path exists before adding to list
     if [ -e "$path" ]; then
         echo "$path" >> "$TMP_SOURCES_LIST"
@@ -112,7 +155,6 @@ done < "$BACKUP_CONF"
 
 if [ ! -s "$TMP_SOURCES_LIST" ]; then
     echo "Error: No valid source files or directories found to back up. Check $BACKUP_CONF." >&2
-    rm "$TMP_SOURCES_LIST"
     exit 1
 fi
 
@@ -128,6 +170,14 @@ fi
 # Append args from config file
 if [[ -n "$ADDITIONAL_TAR_ARGS_FROM_CONF" ]]; then
     TAR_CMD_ARGS_STR="$TAR_CMD_ARGS_STR $ADDITIONAL_TAR_ARGS_FROM_CONF"
+fi
+
+# Append the EXCLUDE: paths from the config. '--anchored' makes each pattern match
+# from the start of the (absolute) stored member name, so excluding
+# /home/me/foo/bar/baz leaves /home/me/foo/bar/bat alone. It comes last so it only
+# applies to these patterns and not to the component excludes above ('.git' etc).
+if [ -s "$TMP_EXCLUDES_LIST" ]; then
+    TAR_CMD_ARGS_STR="$TAR_CMD_ARGS_STR --anchored --exclude-from=\"$TMP_EXCLUDES_LIST\""
 fi
 
 echo "Final combined tar arguments: $TAR_CMD_ARGS_STR"
@@ -166,7 +216,7 @@ eval "tar --create \
 TAR_EXIT_CODE=$?
 
 # --- Cleanup and Report ---
-rm "$TMP_SOURCES_LIST"
+cleanup_tmp_files
 
 # Function to cleanup snapshot backup
 cleanup_snapshot_backup() {
