@@ -40,6 +40,10 @@ help() {
     echo "    -h    Display this help message."
     echo "    -i    Optional input configuration file (default: ~/.backup.conf)."
     echo "    -o    Optional output directory for archives and snapshot file (default: $DEFAULT_BACKUP_DEST_DIR)."
+    echo "    -n    Dry run: list every file that the config selects, then exit. Writes no archive,"
+    echo "          creates no output directory and leaves the snapshot file untouched. Note that"
+    echo "          this lists the full candidate set, not just the files an incremental run would"
+    echo "          actually store."
     echo
     echo "IMPORTANT: The output directory must be persistent for incremental backups to work across runs."
 }
@@ -47,8 +51,9 @@ help() {
 # --- Argument Parsing (from your script) ---
 BACKUP_CONF="$HOME/.backup.conf"
 BACKUP_DEST_DIR="$DEFAULT_BACKUP_DEST_DIR"
+DRY_RUN=0 # 0 for a real backup, 1 to only list what would be archived
 
-while getopts "hi:o:" arg; do
+while getopts "hi:o:n" arg; do
     case $arg in
         h) # display Help
             help
@@ -59,6 +64,9 @@ while getopts "hi:o:" arg; do
             ;;
         o) # optional specify output directory
             BACKUP_DEST_DIR=$OPTARG
+            ;;
+        n) # dry run: list what would be archived, change nothing
+            DRY_RUN=1
             ;;
         \?) # Invalid arg
             echo "Error: Invalid argument" >&2
@@ -74,10 +82,13 @@ if [ ! -f "$BACKUP_CONF" ]; then
     exit 1
 fi
 
-mkdir -p "$BACKUP_DEST_DIR"
-if [ ! -d "$BACKUP_DEST_DIR" ] || [ ! -w "$BACKUP_DEST_DIR" ]; then
-    echo "Error: Backup destination directory is not accessible or writable: $BACKUP_DEST_DIR" >&2
-    exit 1
+# A dry run writes nothing, so it must not create the destination directory either.
+if [ "$DRY_RUN" -eq 0 ]; then
+    mkdir -p "$BACKUP_DEST_DIR"
+    if [ ! -d "$BACKUP_DEST_DIR" ] || [ ! -w "$BACKUP_DEST_DIR" ]; then
+        echo "Error: Backup destination directory is not accessible or writable: $BACKUP_DEST_DIR" >&2
+        exit 1
+    fi
 fi
 
 # --- File Definitions ---
@@ -205,6 +216,34 @@ if [ -s "$TMP_EXCLUDES_LIST" ]; then
 fi
 
 echo "Final combined tar arguments: $TAR_CMD_ARGS_STR"
+
+# --- Dry Run ---
+# Walk the sources applying exactly the same excludes, but throw the archive away.
+# No --listed-incremental (so the snapshot is neither read nor written) and no --gzip
+# (nothing is stored, so compressing would only burn CPU).
+if [ "$DRY_RUN" -eq 1 ]; then
+    yecho "DRY RUN: listing the files that would be archived. Nothing will be written."
+    if [ -f "$SNAPSHOT_FILE" ]; then
+        echo "(A real run would be INCREMENTAL, and would store only what changed since the last backup.)"
+    else
+        echo "(A real run would be a FULL backup of everything listed below.)"
+    fi
+    echo
+    eval "tar --create \
+        $TAR_CMD_ARGS_STR \
+        --file=/dev/null \
+        --verbose \
+        --files-from=\"$TMP_SOURCES_LIST\" \
+        --absolute-names"
+    TAR_EXIT_CODE=$?
+    echo
+    if [ $TAR_EXIT_CODE -eq 0 ] || [ $TAR_EXIT_CODE -eq 1 ]; then
+        gecho "DRY RUN complete (tar exit code: $TAR_EXIT_CODE). No archive, snapshot or output directory was created."
+        exit 0
+    fi
+    recho "DRY RUN failed (tar exit code: $TAR_EXIT_CODE). The config above would not back up cleanly." >&2
+    exit 1
+fi
 
 # --- Determine Archive Name and Type ---
 ARCHIVE_BASENAME="backup_${DATE}"
