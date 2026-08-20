@@ -29,6 +29,9 @@ help() {
     echo "  remain included, e.g. with '~/foo/bar' included and '$EXCLUDE_DIRECTIVE ~/foo/bar/baz',"
     echo "  ~/foo/bar/baz is skipped but ~/foo/bar/bat is still backed up."
     echo "- A leading '~/' is expanded to \$HOME in both included and excluded paths."
+    echo "- Exclude paths may contain wildcards, e.g. '$EXCLUDE_DIRECTIVE ~/code/**/node_modules'."
+    echo "  Note that tar's '*' spans '/', so a single '*' already matches any depth;"
+    echo "  '/**/' additionally matches zero directories (like a shell globstar)."
     echo
     echo "Options:"
     echo "    -h    Display this help message."
@@ -104,6 +107,22 @@ normalise_path() {
     printf '%s' "$p"
 }
 
+# Emit every variant of an exclude pattern in which each '/**/' either stays put or
+# collapses to '/'. tar's '*' already spans '/', so '/code/**/nm' matches any nested
+# 'nm'; the collapsed variant '/code/nm' is what makes '**' also match zero
+# directories, the way a shell globstar would. Prints one pattern per line.
+expand_globstar() {
+    local prefix="$1" p="$2" head rest
+    if [[ "$p" == */'**'/* ]]; then
+        head="${p%%/'**'/*}"
+        rest="${p#*/'**'/}"
+        expand_globstar "$prefix$head/**/" "$rest"
+        expand_globstar "$prefix$head/" "$rest"
+    else
+        printf '%s\n' "$prefix$p"
+    fi
+}
+
 # --- Process Configuration File ---
 echo "Processing configuration file: $BACKUP_CONF"
 ADDITIONAL_TAR_ARGS_FROM_CONF=""
@@ -133,6 +152,10 @@ while IFS= read -r line || [[ -n "$line" ]]; do
         exclude_path=$(normalise_path "$exclude_path")
         if [[ -z "$exclude_path" ]]; then
             yecho "Warning: Ignoring '$EXCLUDE_DIRECTIVE' line with no path." >&2
+        elif [[ "$exclude_path" == *[\*\?\[]* ]]; then
+            # A wildcard pattern: no existence check, and expand any '/**/' segments
+            expand_globstar "" "$exclude_path" >> "$TMP_EXCLUDES_LIST"
+            echo "Excluding (pattern): $exclude_path"
         else
             if [ ! -e "$exclude_path" ]; then
                 yecho "Warning: Excluded path does not currently exist: '$exclude_path'" >&2
